@@ -1,0 +1,89 @@
+# =====================================
+#   Compiled output
+# =====================================
+dist/
+build/
+node_modules/
+tmp/
+temp/
+.temp
+.tmp
+
+# =====================================
+#   Models pesados (Whisper/Xenova)
+# =====================================
+models/
+!models/README.md
+uploads/
+# =====================================
+#   Logs
+# =====================================
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# =====================================
+#   Runtime data
+# =====================================
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# =====================================
+#   Diagnostic reports
+# =====================================
+report.*.json
+
+# =====================================
+#   Tests / Coverage
+# =====================================
+coverage/
+.nyc_output/
+
+# =====================================
+#   Environment variables
+# =====================================
+.env
+.env.*
+!.env.example
+
+# =====================================
+#   Editors and IDEs
+# =====================================
+.idea/
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# =====================================
+#   TypeScript
+# =====================================
+*.tsbuildinfo
+
+# =====================================
+#   OS Files
+# =====================================
+.DS_Store
+Thumbs.db
+
+# =====================================
+#   Miscellaneous
+# =====================================
+libpeerconnection.log
+testem.log
+typings/
