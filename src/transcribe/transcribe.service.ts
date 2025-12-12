@@ -5,11 +5,14 @@ import { AssemblyAI } from 'assemblyai';
 export class TranscribeService {
   private readonly logger = new Logger(TranscribeService.name);
   private assembly: AssemblyAI | null;
-  private sessionData = new Map<string, {
-    lastFullTranscript: string;
-    lastSentLength: number;
-    firstPartialReceived: boolean; // Track if we got first partial
-  }>();
+  private sessionData = new Map<
+    string,
+    {
+      lastFullTranscript: string;
+      lastSentLength: number;
+      firstPartialReceived: boolean;
+    }
+  >();
 
   constructor() {
     const apiKey = process.env.ASSEMBLYAI_API_KEY;
@@ -24,13 +27,15 @@ export class TranscribeService {
 
   async transcribe(file: Express.Multer.File): Promise<{ text: string }> {
     try {
-      this.logger.log(`Batch: ${file.originalname}, tamaño: ${file.size} bytes`);
+      this.logger.log(
+        `Batch: ${file.originalname}, tamaño: ${file.size} bytes`,
+      );
       if (!this.assembly) {
         return { text: 'Mock batch: Audio procesado' };
       }
       const transcript = await this.assembly.transcripts.transcribe({
         audio: file.buffer,
-        language_code: 'es',
+        language_code: 'es', // Batch mode: español
       });
 
       if (transcript.status === 'completed') {
@@ -46,16 +51,67 @@ export class TranscribeService {
     }
   }
 
-  async startRealTimeTranscription(sessionId: string, callback: (partialData: string) => void): Promise<any> {
+  // 🔥 FUNCIÓN NUEVA: Detectar idioma en backend
+  private detectLanguage(text: string): 'es' | 'en' {
+    const cleanText = text.toLowerCase().trim();
+
+    // 1. Caracteres españoles = automáticamente español
+    if (/[áéíóúñ¿¡]/i.test(cleanText)) {
+      return 'es';
+    }
+
+    // 2. Patrones gramaticales españoles
+    const spanishGrammarPatterns = [
+      /\b(que|qué)\s+(es|son|está|están|tiene|tienen)\b/i,
+      /\b(el|la|los|las)\s+\w+\s+(de|del)\b/i,
+      /\b(esto|esta|este|eso|esa|ese)\s+(es|son)\b/i,
+      /\b(muy|más|menos)\s+\w+/i,
+      /\b(no|si)\s+(puedo|puede|quiero|quiere|voy|va)\b/i,
+      /\baquí\s+(es|está|en)\b/i,
+      /\bestamos\s+(con|en)\b/i,
+    ];
+
+    if (spanishGrammarPatterns.some((pattern) => pattern.test(cleanText))) {
+      return 'es';
+    }
+
+    // 3. Lista expandida de palabras españolas comunes
+    const spanishPattern =
+      /\b(de|del|el|la|los|las|un|una|está|están|son|es|como|qué|cómo|por|para|con|sin|pero|y|o|mi|tu|su|me|te|se|lo|le|ha|he|sido|sé|vamos|hacer|entonces|solo|mientras|lugares|más|nada|esto|no|que|muy|aquí|allí|allá|ahí|bien|mal|todo|siempre|nunca|cuando|donde|mucho|poco|grande|nuevo|bueno|malo|si|sí|ver|vea|veía|ir|voy|va|hacer|hago|dice|decir|ser|estar|tener|tengo|tiene|poder|puedo|puede|querer|quiero|deber|debe|año|día|vez|cosa|gente|tiempo|vida|casa|ciudad|centro|corazón|velada|desde|hasta|otro|mismo|cada|todos|sufro|huevo|viéndome|estamos|sea|medellín|raro|querer)\b/gi;
+
+    const words = cleanText.split(/\s+/).filter((w) => w.length > 0);
+    const spanishMatches = cleanText.match(spanishPattern);
+    const spanishWordCount = spanishMatches ? spanishMatches.length : 0;
+    const spanishRatio = spanishWordCount / words.length;
+
+    // Umbral: 18% para español (ajustable)
+    if (words.length <= 5 && spanishWordCount >= 1) {
+      return 'es';
+    }
+
+    if (spanishRatio >= 0.18) {
+      this.logger.log(
+        `🎯 Spanish detected: ${(spanishRatio * 100).toFixed(1)}% (${spanishWordCount}/${words.length} words)`,
+      );
+      return 'es';
+    }
+
+    return 'en';
+  }
+
+  async startRealTimeTranscription(
+    sessionId: string,
+    callback: (partialData: string) => void,
+  ): Promise<any> {
     this.logger.log(`Iniciando v4 real-time para session ${sessionId}`);
     if (!this.assembly) {
       this.logger.log(`Mock real-time para ${sessionId}`);
       const mockInterval = setInterval(() => {
-        const mockData = JSON.stringify({ 
-          text: `Mock partial [${sessionId}]: Hablando en vivo...`, 
-          lang: 'en', 
-          isNewTurn: false, 
-          sessionId: sessionId 
+        const mockData = JSON.stringify({
+          text: `Mock partial [${sessionId}]: Hablando en vivo...`,
+          language: 'es', // ← Cambiado de 'lang' a 'language'
+          isNewTurn: false,
+          sessionId: sessionId,
         });
         callback(mockData);
       }, 2000);
@@ -63,23 +119,22 @@ export class TranscribeService {
     }
 
     // Init session data - RESET on each new transcription
-    this.sessionData.set(sessionId, { 
-      lastFullTranscript: '', 
+    this.sessionData.set(sessionId, {
+      lastFullTranscript: '',
       lastSentLength: 0,
-      firstPartialReceived: false
+      firstPartialReceived: false,
     });
 
     try {
       const config = {
         sampleRate: 16000,
-        // Use multilingual model for English + Spanish support
+        // ✅ Modelo multilenguaje configurado correctamente
         speechModel: 'universal-streaming-multilingual' as any,
-        vad_threshold: 0.3, // Lower = more sensitive (catches quiet starts), 0.0-1.0
-        end_silence_timeout: 1.5, // 1.5s for balance
-        max_end_of_turn_silence_ms: 1500, // Match end_silence_timeout in ms
-        // Add these for better handling of pauses
-        disable_partial_transcripts: false, // Keep partials enabled
-        word_boost: [], // Can add specific words if needed
+        vad_threshold: 0.3,
+        end_silence_timeout: 1.5,
+        max_end_of_turn_silence_ms: 1500,
+        disable_partial_transcripts: false,
+        word_boost: [],
         boost_param: 'default' as any,
       };
 
@@ -96,7 +151,10 @@ export class TranscribeService {
         this.logger.log(`v4 WS abierto para ${sessionId} (ID: ${data.id})`);
         if (bufferIndex > 0) {
           const chunk = audioBuffer.slice(0, bufferIndex);
-          const arrayBuffer = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+          const arrayBuffer = chunk.buffer.slice(
+            chunk.byteOffset,
+            chunk.byteOffset + chunk.byteLength,
+          );
           transcriber.sendAudio(arrayBuffer);
           this.logger.log(`Buffered chunk enviado: ${bufferIndex} samples`);
           bufferIndex = 0;
@@ -106,11 +164,16 @@ export class TranscribeService {
       (transcriber.on as any)('turn', (data: any) => {
         const fullTranscript = data.transcript || '';
         const isFinal = data.is_final || false;
-        const detectedLang = 'en';
 
         if (!fullTranscript.trim()) {
           return; // Ignore empty
         }
+
+        // 🔥 DETECTAR IDIOMA EN BACKEND
+        const detectedLang = this.detectLanguage(fullTranscript);
+        this.logger.log(
+          `🌐 Detected language [${sessionId}]: ${detectedLang} for "${fullTranscript.substring(0, 30)}..."`,
+        );
 
         const session = this.sessionData.get(sessionId);
         if (!session) {
@@ -123,69 +186,78 @@ export class TranscribeService {
         if (isFinal) {
           // FINAL: Send full text, then RESET for next turn
           textToSend = fullTranscript.trim();
-          this.logger.log(`✅ FINAL [${sessionId}]: "${textToSend.substring(0, 60)}..."`);
-          
+          this.logger.log(
+            `✅ FINAL [${sessionId}] [${detectedLang}]: "${textToSend.substring(0, 60)}..."`,
+          );
+
           // Reset session for next turn
           session.lastFullTranscript = '';
           session.lastSentLength = 0;
-          session.firstPartialReceived = false; // Reset for next turn
-          
-          const partialData = JSON.stringify({ 
-            text: textToSend, 
-            lang: detectedLang, 
-            isNewTurn: true, 
-            sessionId: sessionId 
+          session.firstPartialReceived = false;
+
+          const partialData = JSON.stringify({
+            text: textToSend,
+            language: detectedLang, // ← Enviar idioma detectado
+            isNewTurn: true,
+            sessionId: sessionId,
           });
           callback(partialData);
         } else {
           // PARTIAL: Extract only NEW text (diff from last sent)
           if (fullTranscript.length > session.lastSentLength) {
             // Extract new portion
-            textToSend = fullTranscript.substring(session.lastSentLength).trim();
-            
+            textToSend = fullTranscript
+              .substring(session.lastSentLength)
+              .trim();
+
             // Update tracking
             session.lastFullTranscript = fullTranscript;
             session.lastSentLength = fullTranscript.length;
-            
+
             if (textToSend) {
-              this.logger.log(`📝 PARTIAL [${sessionId}]: New="${textToSend.substring(0, 40)}..." (sent: ${session.lastSentLength}/${fullTranscript.length})`);
-              
-              const partialData = JSON.stringify({ 
-                text: textToSend, 
-                lang: detectedLang, 
-                isNewTurn: false, 
-                sessionId: sessionId 
+              this.logger.log(
+                `📝 PARTIAL [${sessionId}] [${detectedLang}]: New="${textToSend.substring(0, 40)}..." (sent: ${session.lastSentLength}/${fullTranscript.length})`,
+              );
+
+              const partialData = JSON.stringify({
+                text: textToSend,
+                language: detectedLang, // ← Enviar idioma detectado
+                isNewTurn: false,
+                sessionId: sessionId,
               });
               callback(partialData);
             }
           } else if (fullTranscript.length < session.lastSentLength) {
-            // AssemblyAI reformulated (shorter) - likely a correction mid-stream
-            // Instead of sending reformulation, just reset tracking and wait for next partial
-            // This prevents jarring replacements in the UI
-            this.logger.log(`🔄 REFORMULATION ignored [${sessionId}]: Old=${session.lastSentLength} → New=${fullTranscript.length}, waiting for continuation...`);
+            // AssemblyAI reformulated (shorter) - reset tracking
+            this.logger.log(
+              `🔄 REFORMULATION ignored [${sessionId}]: Old=${session.lastSentLength} → New=${fullTranscript.length}`,
+            );
             session.lastFullTranscript = fullTranscript;
             session.lastSentLength = fullTranscript.length;
-            // Don't send anything - wait for next accumulation
           } else {
-            // Same length - likely duplicate, ignore
-            this.logger.log(`⏭️ DUPLICATE ignored [${sessionId}]: Same length ${fullTranscript.length}`);
+            // Same length - duplicate, ignore
+            this.logger.log(
+              `⏭️ DUPLICATE ignored [${sessionId}]: Same length ${fullTranscript.length}`,
+            );
           }
         }
       });
 
       transcriber.on('error', (error: any) => {
         this.logger.error(`v4 error [${sessionId}]: ${error.message}`);
-        const fallbackData = JSON.stringify({ 
-          text: 'Fallback: Audio detectado (error en API)', 
-          lang: 'en', 
-          isNewTurn: true, 
-          sessionId: sessionId 
+        const fallbackData = JSON.stringify({
+          text: 'Fallback: Audio detectado (error en API)',
+          language: 'en',
+          isNewTurn: true,
+          sessionId: sessionId,
         });
         callback(fallbackData);
       });
 
       transcriber.on('close', (code: number, reason: string) => {
-        this.logger.log(`v4 WS cerrado para ${sessionId} (code: ${code}, reason: ${reason})`);
+        this.logger.log(
+          `v4 WS cerrado para ${sessionId} (code: ${code}, reason: ${reason})`,
+        );
         this.sessionData.delete(sessionId);
         isOpen = false;
       });
@@ -199,10 +271,15 @@ export class TranscribeService {
           audioBuffer[bufferIndex++] = pcmData[i];
           if (bufferIndex >= audioBuffer.length) {
             const sendBuffer = audioBuffer.slice(0, bufferIndex);
-            const arrayBuffer = sendBuffer.buffer.slice(sendBuffer.byteOffset, sendBuffer.byteOffset + sendBuffer.byteLength);
+            const arrayBuffer = sendBuffer.buffer.slice(
+              sendBuffer.byteOffset,
+              sendBuffer.byteOffset + sendBuffer.byteLength,
+            );
             if (isOpen) {
               transcriber.sendAudio(arrayBuffer);
-              this.logger.log(`Chunk 100ms enviado a v4 para ${sessionId}: ${bufferIndex} samples`);
+              this.logger.log(
+                `Chunk 100ms enviado a v4 para ${sessionId}: ${bufferIndex} samples`,
+              );
             } else {
               this.logger.log(`Chunk buffered hasta open para ${sessionId}`);
             }
@@ -215,11 +292,11 @@ export class TranscribeService {
     } catch (error) {
       this.logger.error(`Error iniciando v4 [${sessionId}]: ${error.message}`);
       const fallbackInterval = setInterval(() => {
-        const fallbackData = JSON.stringify({ 
-          text: 'Fallback: Test transcripción en vivo...', 
-          lang: 'en', 
-          isNewTurn: false, 
-          sessionId: sessionId 
+        const fallbackData = JSON.stringify({
+          text: 'Fallback: Test transcripción en vivo...',
+          language: 'en',
+          isNewTurn: false,
+          sessionId: sessionId,
         });
         callback(fallbackData);
       }, 2000);
@@ -227,6 +304,263 @@ export class TranscribeService {
     }
   }
 }
+// import { Injectable, Logger } from '@nestjs/common';
+// import { AssemblyAI } from 'assemblyai';
+
+// @Injectable()
+// export class TranscribeService {
+//   private readonly logger = new Logger(TranscribeService.name);
+//   private assembly: AssemblyAI | null;
+//   private sessionData = new Map<
+//     string,
+//     {
+//       lastFullTranscript: string;
+//       lastSentLength: number;
+//       firstPartialReceived: boolean; // Track if we got first partial
+//     }
+//   >();
+
+//   constructor() {
+//     const apiKey = process.env.ASSEMBLYAI_API_KEY;
+//     if (!apiKey) {
+//       this.logger.error('ASSEMBLYAI_API_KEY no encontrada – usando mock');
+//       this.assembly = null;
+//     } else {
+//       this.assembly = new AssemblyAI({ apiKey });
+//       this.logger.log('AssemblyAI v4 real-time listo con key');
+//     }
+//   }
+
+//   async transcribe(file: Express.Multer.File): Promise<{ text: string }> {
+//     try {
+//       this.logger.log(
+//         `Batch: ${file.originalname}, tamaño: ${file.size} bytes`,
+//       );
+//       if (!this.assembly) {
+//         return { text: 'Mock batch: Audio procesado' };
+//       }
+//       const transcript = await this.assembly.transcripts.transcribe({
+//         audio: file.buffer,
+//         language_code: 'es',
+//       });
+
+//       if (transcript.status === 'completed') {
+//         this.logger.log(`Batch texto: ${transcript.text?.length || 0} chars`);
+//         return { text: transcript.text || '' };
+//       } else {
+//         this.logger.warn(`Batch status: ${transcript.status}`);
+//         return { text: '' };
+//       }
+//     } catch (error) {
+//       this.logger.error(`Batch error: ${error.message}`);
+//       return { text: '' };
+//     }
+//   }
+
+//   async startRealTimeTranscription(
+//     sessionId: string,
+//     callback: (partialData: string) => void,
+//   ): Promise<any> {
+//     this.logger.log(`Iniciando v4 real-time para session ${sessionId}`);
+//     if (!this.assembly) {
+//       this.logger.log(`Mock real-time para ${sessionId}`);
+//       const mockInterval = setInterval(() => {
+//         const mockData = JSON.stringify({
+//           text: `Mock partial [${sessionId}]: Hablando en vivo...`,
+//           lang: 'en',
+//           isNewTurn: false,
+//           sessionId: sessionId,
+//         });
+//         callback(mockData);
+//       }, 2000);
+//       return { send: () => {}, close: () => clearInterval(mockInterval) };
+//     }
+
+//     // Init session data - RESET on each new transcription
+//     this.sessionData.set(sessionId, {
+//       lastFullTranscript: '',
+//       lastSentLength: 0,
+//       firstPartialReceived: false,
+//     });
+
+//     try {
+//       const config = {
+//         sampleRate: 16000,
+//         // Use multilingual model for English + Spanish support
+//         speechModel: 'universal-streaming-multilingual' as any,
+//         vad_threshold: 0.3, // Lower = more sensitive (catches quiet starts), 0.0-1.0
+//         end_silence_timeout: 1.5, // 1.5s for balance
+//         max_end_of_turn_silence_ms: 1500, // Match end_silence_timeout in ms
+//         // Add these for better handling of pauses
+//         disable_partial_transcripts: false, // Keep partials enabled
+//         word_boost: [], // Can add specific words if needed
+//         boost_param: 'default' as any,
+//       };
+
+//       this.logger.log(`Config v4: ${JSON.stringify(config)}`);
+
+//       const transcriber = this.assembly.streaming.transcriber(config);
+
+//       let isOpen = false;
+//       const audioBuffer = new Int16Array(1600); // 100ms buffer at 16kHz
+//       let bufferIndex = 0;
+
+//       (transcriber.on as any)('open', (data: any) => {
+//         isOpen = true;
+//         this.logger.log(`v4 WS abierto para ${sessionId} (ID: ${data.id})`);
+//         if (bufferIndex > 0) {
+//           const chunk = audioBuffer.slice(0, bufferIndex);
+//           const arrayBuffer = chunk.buffer.slice(
+//             chunk.byteOffset,
+//             chunk.byteOffset + chunk.byteLength,
+//           );
+//           transcriber.sendAudio(arrayBuffer);
+//           this.logger.log(`Buffered chunk enviado: ${bufferIndex} samples`);
+//           bufferIndex = 0;
+//         }
+//       });
+
+//       (transcriber.on as any)('turn', (data: any) => {
+//         const fullTranscript = data.transcript || '';
+//         const isFinal = data.is_final || false;
+//         const detectedLang = 'en';
+
+//         if (!fullTranscript.trim()) {
+//           return; // Ignore empty
+//         }
+
+//         const session = this.sessionData.get(sessionId);
+//         if (!session) {
+//           this.logger.warn(`Session ${sessionId} not found in turn event`);
+//           return;
+//         }
+
+//         let textToSend = '';
+
+//         if (isFinal) {
+//           // FINAL: Send full text, then RESET for next turn
+//           textToSend = fullTranscript.trim();
+//           this.logger.log(
+//             `✅ FINAL [${sessionId}]: "${textToSend.substring(0, 60)}..."`,
+//           );
+
+//           // Reset session for next turn
+//           session.lastFullTranscript = '';
+//           session.lastSentLength = 0;
+//           session.firstPartialReceived = false; // Reset for next turn
+
+//           const partialData = JSON.stringify({
+//             text: textToSend,
+//             lang: detectedLang,
+//             isNewTurn: true,
+//             sessionId: sessionId,
+//           });
+//           callback(partialData);
+//         } else {
+//           // PARTIAL: Extract only NEW text (diff from last sent)
+//           if (fullTranscript.length > session.lastSentLength) {
+//             // Extract new portion
+//             textToSend = fullTranscript
+//               .substring(session.lastSentLength)
+//               .trim();
+
+//             // Update tracking
+//             session.lastFullTranscript = fullTranscript;
+//             session.lastSentLength = fullTranscript.length;
+
+//             if (textToSend) {
+//               this.logger.log(
+//                 `📝 PARTIAL [${sessionId}]: New="${textToSend.substring(0, 40)}..." (sent: ${session.lastSentLength}/${fullTranscript.length})`,
+//               );
+
+//               const partialData = JSON.stringify({
+//                 text: textToSend,
+//                 lang: detectedLang,
+//                 isNewTurn: false,
+//                 sessionId: sessionId,
+//               });
+//               callback(partialData);
+//             }
+//           } else if (fullTranscript.length < session.lastSentLength) {
+//             // AssemblyAI reformulated (shorter) - likely a correction mid-stream
+//             // Instead of sending reformulation, just reset tracking and wait for next partial
+//             // This prevents jarring replacements in the UI
+//             this.logger.log(
+//               `🔄 REFORMULATION ignored [${sessionId}]: Old=${session.lastSentLength} → New=${fullTranscript.length}, waiting for continuation...`,
+//             );
+//             session.lastFullTranscript = fullTranscript;
+//             session.lastSentLength = fullTranscript.length;
+//             // Don't send anything - wait for next accumulation
+//           } else {
+//             // Same length - likely duplicate, ignore
+//             this.logger.log(
+//               `⏭️ DUPLICATE ignored [${sessionId}]: Same length ${fullTranscript.length}`,
+//             );
+//           }
+//         }
+//       });
+
+//       transcriber.on('error', (error: any) => {
+//         this.logger.error(`v4 error [${sessionId}]: ${error.message}`);
+//         const fallbackData = JSON.stringify({
+//           text: 'Fallback: Audio detectado (error en API)',
+//           lang: 'en',
+//           isNewTurn: true,
+//           sessionId: sessionId,
+//         });
+//         callback(fallbackData);
+//       });
+
+//       transcriber.on('close', (code: number, reason: string) => {
+//         this.logger.log(
+//           `v4 WS cerrado para ${sessionId} (code: ${code}, reason: ${reason})`,
+//         );
+//         this.sessionData.delete(sessionId);
+//         isOpen = false;
+//       });
+
+//       await transcriber.connect();
+//       this.logger.log(`transcriber.connect() completado para ${sessionId}`);
+
+//       const sendChunk = (chunk: ArrayBuffer) => {
+//         const pcmData = new Int16Array(chunk);
+//         for (let i = 0; i < pcmData.length; i++) {
+//           audioBuffer[bufferIndex++] = pcmData[i];
+//           if (bufferIndex >= audioBuffer.length) {
+//             const sendBuffer = audioBuffer.slice(0, bufferIndex);
+//             const arrayBuffer = sendBuffer.buffer.slice(
+//               sendBuffer.byteOffset,
+//               sendBuffer.byteOffset + sendBuffer.byteLength,
+//             );
+//             if (isOpen) {
+//               transcriber.sendAudio(arrayBuffer);
+//               this.logger.log(
+//                 `Chunk 100ms enviado a v4 para ${sessionId}: ${bufferIndex} samples`,
+//               );
+//             } else {
+//               this.logger.log(`Chunk buffered hasta open para ${sessionId}`);
+//             }
+//             bufferIndex = 0;
+//           }
+//         }
+//       };
+
+//       return { send: sendChunk, close: () => transcriber.close() };
+//     } catch (error) {
+//       this.logger.error(`Error iniciando v4 [${sessionId}]: ${error.message}`);
+//       const fallbackInterval = setInterval(() => {
+//         const fallbackData = JSON.stringify({
+//           text: 'Fallback: Test transcripción en vivo...',
+//           lang: 'en',
+//           isNewTurn: false,
+//           sessionId: sessionId,
+//         });
+//         callback(fallbackData);
+//       }, 2000);
+//       return { send: () => {}, close: () => clearInterval(fallbackInterval) };
+//     }
+//   }
+// }
 // import { Injectable, Logger } from '@nestjs/common';
 // import { AssemblyAI } from 'assemblyai';
 
