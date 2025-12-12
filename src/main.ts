@@ -12,8 +12,9 @@ async function bootstrap() {
   // CORS global (local + prod)
   app.enableCors({
     origin: [
+      'https://getintercall.vercel.app',
       'http://localhost:4200', // Local Angular
-      'https://getintercall-mup5dfxnc-adonis-projects-9faf0f78.vercel.app', // Tu Vercel URL (ajusta si cambia)
+      'getintercall-git-main-adonis-projects-9faf0f78.vercel.app', // Tu Vercel URL (ajusta si cambia)
     ],
     methods: 'GET,POST,PUT,DELETE,OPTIONS', // OPTIONS para polling
     allowedHeaders: 'Content-Type, Authorization',
