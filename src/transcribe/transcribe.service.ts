@@ -35,7 +35,7 @@ export class TranscribeService {
       }
       const transcript = await this.assembly.transcripts.transcribe({
         audio: file.buffer,
-        language_code: 'es', // Batch mode: español
+        language_code: 'es',
       });
 
       if (transcript.status === 'completed') {
@@ -51,16 +51,13 @@ export class TranscribeService {
     }
   }
 
-  // 🔥 FUNCIÓN NUEVA: Detectar idioma en backend
   private detectLanguage(text: string): 'es' | 'en' {
     const cleanText = text.toLowerCase().trim();
 
-    // 1. Caracteres españoles = automáticamente español
     if (/[áéíóúñ¿¡]/i.test(cleanText)) {
       return 'es';
     }
 
-    // 2. Patrones gramaticales españoles
     const spanishGrammarPatterns = [
       /\b(que|qué)\s+(es|son|está|están|tiene|tienen)\b/i,
       /\b(el|la|los|las)\s+\w+\s+(de|del)\b/i,
@@ -75,7 +72,6 @@ export class TranscribeService {
       return 'es';
     }
 
-    // 3. Lista expandida de palabras españolas comunes
     const spanishPattern =
       /\b(de|del|el|la|los|las|un|una|está|están|son|es|como|qué|cómo|por|para|con|sin|pero|y|o|mi|tu|su|me|te|se|lo|le|ha|he|sido|sé|vamos|hacer|entonces|solo|mientras|lugares|más|nada|esto|no|que|muy|aquí|allí|allá|ahí|bien|mal|todo|siempre|nunca|cuando|donde|mucho|poco|grande|nuevo|bueno|malo|si|sí|ver|vea|veía|ir|voy|va|hacer|hago|dice|decir|ser|estar|tener|tengo|tiene|poder|puedo|puede|querer|quiero|deber|debe|año|día|vez|cosa|gente|tiempo|vida|casa|ciudad|centro|corazón|velada|desde|hasta|otro|mismo|cada|todos|sufro|huevo|viéndome|estamos|sea|medellín|raro|querer)\b/gi;
 
@@ -84,7 +80,6 @@ export class TranscribeService {
     const spanishWordCount = spanishMatches ? spanishMatches.length : 0;
     const spanishRatio = spanishWordCount / words.length;
 
-    // Umbral: 18% para español (ajustable)
     if (words.length <= 5 && spanishWordCount >= 1) {
       return 'es';
     }
@@ -109,7 +104,7 @@ export class TranscribeService {
       const mockInterval = setInterval(() => {
         const mockData = JSON.stringify({
           text: `Mock partial [${sessionId}]: Hablando en vivo...`,
-          language: 'es', // ← Cambiado de 'lang' a 'language'
+          language: 'es',
           isNewTurn: false,
           sessionId: sessionId,
         });
@@ -118,7 +113,6 @@ export class TranscribeService {
       return { send: () => {}, close: () => clearInterval(mockInterval) };
     }
 
-    // Init session data - RESET on each new transcription
     this.sessionData.set(sessionId, {
       lastFullTranscript: '',
       lastSentLength: 0,
@@ -128,17 +122,28 @@ export class TranscribeService {
     try {
       const config = {
         sampleRate: 16000,
-        // ✅ Modelo multilenguaje configurado correctamente
         speechModel: 'universal-streaming-multilingual' as any,
-        vad_threshold: 0.3,
-        end_silence_timeout: 1.5,
-        max_end_of_turn_silence_ms: 1500,
+
+        // 🔥 VAD DESACTIVADO - Enviar TODO a AssemblyAI sin filtrar
+        vad_threshold: 0.0, // 0.0 = desactivado, procesa todo el audio
+
+        // 🔥 TIMEOUTS MÁS LARGOS - No cortar palabras
+        end_silence_timeout: 2.5, // ← 2.5s para no cortar entre palabras
+        max_end_of_turn_silence_ms: 2500, // ← 2.5s en milisegundos
+
+        // 🔥 DESACTIVAR padding - Ya enviamos todo desde frontend
+        // extra_session_information: {
+        //   audio_start_padding_ms: 0
+        // } as any
+
         disable_partial_transcripts: false,
         word_boost: [],
         boost_param: 'default' as any,
       };
 
-      this.logger.log(`Config v4: ${JSON.stringify(config)}`);
+      this.logger.log(
+        `🎤 Config VAD sensible: threshold=${config.vad_threshold}, silence=${config.end_silence_timeout}s`,
+      );
 
       const transcriber = this.assembly.streaming.transcriber(config);
 
@@ -166,13 +171,12 @@ export class TranscribeService {
         const isFinal = data.is_final || false;
 
         if (!fullTranscript.trim()) {
-          return; // Ignore empty
+          return;
         }
 
-        // 🔥 DETECTAR IDIOMA EN BACKEND
         const detectedLang = this.detectLanguage(fullTranscript);
         this.logger.log(
-          `🌐 Detected language [${sessionId}]: ${detectedLang} for "${fullTranscript.substring(0, 30)}..."`,
+          `🌐 Detected [${sessionId}]: ${detectedLang} for "${fullTranscript.substring(0, 30)}..."`,
         );
 
         const session = this.sessionData.get(sessionId);
@@ -184,33 +188,28 @@ export class TranscribeService {
         let textToSend = '';
 
         if (isFinal) {
-          // FINAL: Send full text, then RESET for next turn
           textToSend = fullTranscript.trim();
           this.logger.log(
             `✅ FINAL [${sessionId}] [${detectedLang}]: "${textToSend.substring(0, 60)}..."`,
           );
 
-          // Reset session for next turn
           session.lastFullTranscript = '';
           session.lastSentLength = 0;
           session.firstPartialReceived = false;
 
           const partialData = JSON.stringify({
             text: textToSend,
-            language: detectedLang, // ← Enviar idioma detectado
+            language: detectedLang,
             isNewTurn: true,
             sessionId: sessionId,
           });
           callback(partialData);
         } else {
-          // PARTIAL: Extract only NEW text (diff from last sent)
           if (fullTranscript.length > session.lastSentLength) {
-            // Extract new portion
             textToSend = fullTranscript
               .substring(session.lastSentLength)
               .trim();
 
-            // Update tracking
             session.lastFullTranscript = fullTranscript;
             session.lastSentLength = fullTranscript.length;
 
@@ -221,21 +220,19 @@ export class TranscribeService {
 
               const partialData = JSON.stringify({
                 text: textToSend,
-                language: detectedLang, // ← Enviar idioma detectado
+                language: detectedLang,
                 isNewTurn: false,
                 sessionId: sessionId,
               });
               callback(partialData);
             }
           } else if (fullTranscript.length < session.lastSentLength) {
-            // AssemblyAI reformulated (shorter) - reset tracking
             this.logger.log(
               `🔄 REFORMULATION ignored [${sessionId}]: Old=${session.lastSentLength} → New=${fullTranscript.length}`,
             );
             session.lastFullTranscript = fullTranscript;
             session.lastSentLength = fullTranscript.length;
           } else {
-            // Same length - duplicate, ignore
             this.logger.log(
               `⏭️ DUPLICATE ignored [${sessionId}]: Same length ${fullTranscript.length}`,
             );
@@ -277,8 +274,13 @@ export class TranscribeService {
             );
             if (isOpen) {
               transcriber.sendAudio(arrayBuffer);
+
+              // 🔥 LOG NIVEL DE AUDIO para debug
+              const avgLevel = this.calculateAudioLevel(
+                new Int16Array(arrayBuffer),
+              );
               this.logger.log(
-                `Chunk 100ms enviado a v4 para ${sessionId}: ${bufferIndex} samples`,
+                `Chunk 100ms enviado a v4 para ${sessionId}: ${bufferIndex} samples, nivel: ${avgLevel.toFixed(2)}dB`,
               );
             } else {
               this.logger.log(`Chunk buffered hasta open para ${sessionId}`);
@@ -302,6 +304,18 @@ export class TranscribeService {
       }, 2000);
       return { send: () => {}, close: () => clearInterval(fallbackInterval) };
     }
+  }
+
+  // 🔥 NUEVA FUNCIÓN: Calcular nivel de audio en backend
+  private calculateAudioLevel(buffer: Int16Array): number {
+    let sum = 0;
+    for (let i = 0; i < buffer.length; i++) {
+      sum += Math.abs(buffer[i]);
+    }
+    const avg = sum / buffer.length;
+    const normalized = avg / 32768;
+    const db = 20 * Math.log10(normalized + 0.0001);
+    return db;
   }
 }
 // import { Injectable, Logger } from '@nestjs/common';

@@ -13,11 +13,12 @@ import { TranscribeService } from './transcribe.service';
 
 @WebSocketGateway({
   cors: {
-    origin: ['http://localhost:4200',
-    'https://localhost:4200',
-    'getintercall-git-main-adonis-projects-9faf0f78.vercel.app',
-    'https://getintercall.vercel.app'
-  ],
+    origin: [
+      'http://localhost:4200',
+      'https://localhost:4200',
+      'getintercall-git-main-adonis-projects-9faf0f78.vercel.app',
+      'https://getintercall.vercel.app',
+    ],
     methods: ['GET', 'POST'],
     credentials: true,
   },
