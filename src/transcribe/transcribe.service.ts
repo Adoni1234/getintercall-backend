@@ -53,11 +53,11 @@ export class TranscribeService {
 
   private detectLanguage(text: string): 'es' | 'en' {
     const cleanText = text.toLowerCase().trim();
-
+    
     if (/[áéíóúñ¿¡]/i.test(cleanText)) {
       return 'es';
     }
-
+    
     const spanishGrammarPatterns = [
       /\b(que|qué)\s+(es|son|está|están|tiene|tienen)\b/i,
       /\b(el|la|los|las)\s+\w+\s+(de|del)\b/i,
@@ -67,30 +67,27 @@ export class TranscribeService {
       /\baquí\s+(es|está|en)\b/i,
       /\bestamos\s+(con|en)\b/i,
     ];
-
-    if (spanishGrammarPatterns.some((pattern) => pattern.test(cleanText))) {
+    
+    if (spanishGrammarPatterns.some(pattern => pattern.test(cleanText))) {
       return 'es';
     }
-
-    const spanishPattern =
-      /\b(de|del|el|la|los|las|un|una|está|están|son|es|como|qué|cómo|por|para|con|sin|pero|y|o|mi|tu|su|me|te|se|lo|le|ha|he|sido|sé|vamos|hacer|entonces|solo|mientras|lugares|más|nada|esto|no|que|muy|aquí|allí|allá|ahí|bien|mal|todo|siempre|nunca|cuando|donde|mucho|poco|grande|nuevo|bueno|malo|si|sí|ver|vea|veía|ir|voy|va|hacer|hago|dice|decir|ser|estar|tener|tengo|tiene|poder|puedo|puede|querer|quiero|deber|debe|año|día|vez|cosa|gente|tiempo|vida|casa|ciudad|centro|corazón|velada|desde|hasta|otro|mismo|cada|todos|sufro|huevo|viéndome|estamos|sea|medellín|raro|querer)\b/gi;
-
-    const words = cleanText.split(/\s+/).filter((w) => w.length > 0);
+    
+    const spanishPattern = /\b(de|del|el|la|los|las|un|una|está|están|son|es|como|qué|cómo|por|para|con|sin|pero|y|o|mi|tu|su|me|te|se|lo|le|ha|he|sido|sé|vamos|hacer|entonces|solo|mientras|lugares|más|nada|esto|no|que|muy|aquí|allí|allá|ahí|bien|mal|todo|siempre|nunca|cuando|donde|mucho|poco|grande|nuevo|bueno|malo|si|sí|ver|vea|veía|ir|voy|va|hacer|hago|dice|decir|ser|estar|tener|tengo|tiene|poder|puedo|puede|querer|quiero|deber|debe|año|día|vez|cosa|gente|tiempo|vida|casa|ciudad|centro|corazón|velada|desde|hasta|otro|mismo|cada|todos|sufro|huevo|viéndome|estamos|sea|medellín|raro|querer)\b/gi;
+    
+    const words = cleanText.split(/\s+/).filter(w => w.length > 0);
     const spanishMatches = cleanText.match(spanishPattern);
     const spanishWordCount = spanishMatches ? spanishMatches.length : 0;
     const spanishRatio = spanishWordCount / words.length;
-
+    
     if (words.length <= 5 && spanishWordCount >= 1) {
       return 'es';
     }
-
+    
     if (spanishRatio >= 0.18) {
-      this.logger.log(
-        `🎯 Spanish detected: ${(spanishRatio * 100).toFixed(1)}% (${spanishWordCount}/${words.length} words)`,
-      );
+      this.logger.log(`🎯 Spanish detected: ${(spanishRatio * 100).toFixed(1)}% (${spanishWordCount}/${words.length} words)`);
       return 'es';
     }
-
+    
     return 'en';
   }
 
@@ -123,27 +120,20 @@ export class TranscribeService {
       const config = {
         sampleRate: 16000,
         speechModel: 'universal-streaming-multilingual' as any,
-
-        // 🔥 VAD DESACTIVADO - Enviar TODO a AssemblyAI sin filtrar
-        vad_threshold: 0.0, // 0.0 = desactivado, procesa todo el audio
-
-        // 🔥 TIMEOUTS MÁS LARGOS - No cortar palabras
-        end_silence_timeout: 2.5, // ← 2.5s para no cortar entre palabras
-        max_end_of_turn_silence_ms: 2500, // ← 2.5s en milisegundos
-
-        // 🔥 DESACTIVAR padding - Ya enviamos todo desde frontend
-        // extra_session_information: {
-        //   audio_start_padding_ms: 0
-        // } as any
-
+        
+        // 🔥 VAD COMPLETAMENTE DESACTIVADO
+        vad_threshold: 0.0,
+        
+        // 🔥 TIMEOUTS MUY LARGOS - NUNCA cortar
+        end_silence_timeout: 3.0,           // ← 3 segundos
+        max_end_of_turn_silence_ms: 3000,
+        
         disable_partial_transcripts: false,
-        word_boost: [],
+        word_boost: [], 
         boost_param: 'default' as any,
       };
 
-      this.logger.log(
-        `🎤 Config VAD sensible: threshold=${config.vad_threshold}, silence=${config.end_silence_timeout}s`,
-      );
+      this.logger.log(`🎤 Config ULTRA sensible: VAD=0.0, silence=3.0s, NO filtros`);
 
       const transcriber = this.assembly.streaming.transcriber(config);
 
@@ -175,9 +165,7 @@ export class TranscribeService {
         }
 
         const detectedLang = this.detectLanguage(fullTranscript);
-        this.logger.log(
-          `🌐 Detected [${sessionId}]: ${detectedLang} for "${fullTranscript.substring(0, 30)}..."`,
-        );
+        this.logger.log(`🌐 Detected [${sessionId}]: ${detectedLang} for "${fullTranscript.substring(0, 30)}..."`);
 
         const session = this.sessionData.get(sessionId);
         if (!session) {
@@ -274,11 +262,9 @@ export class TranscribeService {
             );
             if (isOpen) {
               transcriber.sendAudio(arrayBuffer);
-
+              
               // 🔥 LOG NIVEL DE AUDIO para debug
-              const avgLevel = this.calculateAudioLevel(
-                new Int16Array(arrayBuffer),
-              );
+              const avgLevel = this.calculateAudioLevel(new Int16Array(arrayBuffer));
               this.logger.log(
                 `Chunk 100ms enviado a v4 para ${sessionId}: ${bufferIndex} samples, nivel: ${avgLevel.toFixed(2)}dB`,
               );
