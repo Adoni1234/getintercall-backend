@@ -10,7 +10,7 @@ async function bootstrap() {
       'https://getintercall.vercel.app',
       'https://localhost:4200',
       'http://localhost:4200',
-      'https://getintercall-mup5dfxnc-adonis-projects-9faf0f78.vercel.app'
+      'https://getintercall-mup5dfxnc-adonis-projects-9faf0f78.vercel.app',
     ],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],

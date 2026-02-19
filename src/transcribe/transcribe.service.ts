@@ -6,15 +6,10 @@ export class TranscribeService {
   private readonly logger = new Logger(TranscribeService.name);
   private assembly: AssemblyAI | null;
 
-  // Ajusta este valor según el ritmo de los intérpretes:
-  // 1000ms = corta rápido (bueno si hablan en frases cortas con pausa breve)
-  // 1500ms = balance recomendado
-  // 2000ms = más tolerante (bueno si hacen pausas naturales largas entre frases)
-  private readonly END_SILENCE_THRESHOLD_MS = 1500;
-
-  // Timer de seguridad en backend: si AssemblyAI no envía is_final, lo forzamos
-  // Debe ser mayor que END_SILENCE_THRESHOLD_MS
-  private readonly FORCE_CLOSE_AFTER_MS = 1800;
+  // 2000ms: más tolerante con pausas naturales de intérpretes
+  private readonly END_SILENCE_THRESHOLD_MS = 2000;
+  // Timer de seguridad: si AssemblyAI no envía is_final, lo forzamos
+  private readonly FORCE_CLOSE_AFTER_MS = 2500;
 
   private sessionData = new Map<
     string,
@@ -100,7 +95,7 @@ export class TranscribeService {
     const lang = this.detectLanguage(text);
 
     this.logger.log(
-      `⏱️ FORCE CLOSE TURN [${sessionId}] [${lang}]: "${text.substring(0, 60)}"`,
+      `⏱️ FORCE CLOSE [${sessionId}] [${lang}]: "${text.substring(0, 60)}"`,
     );
 
     session.callback(
@@ -141,7 +136,6 @@ export class TranscribeService {
     this.logger.log(`Iniciando real-time para session ${sessionId}`);
 
     if (!this.assembly) {
-      this.logger.log(`Mock real-time para ${sessionId}`);
       const mockInterval = setInterval(() => {
         callback(
           JSON.stringify({
@@ -172,8 +166,7 @@ export class TranscribeService {
       };
 
       this.logger.log(
-        `🎤 Config: sampleRate=16000, modelo=multilingual, ` +
-          `silence=${this.END_SILENCE_THRESHOLD_MS}ms, forceClose=${this.FORCE_CLOSE_AFTER_MS}ms`,
+        `🎤 Config: sampleRate=16000, multilingual, silence=${this.END_SILENCE_THRESHOLD_MS}ms, forceClose=${this.FORCE_CLOSE_AFTER_MS}ms`,
       );
 
       const transcriber = this.assembly.streaming.transcriber(config);
@@ -198,7 +191,6 @@ export class TranscribeService {
         const detectedLang = this.detectLanguage(incomingText);
 
         if (isFinal) {
-          // AssemblyAI cerró el turno — cancelar nuestro timer
           if (session.turnTimer) {
             clearTimeout(session.turnTimer);
             session.turnTimer = null;
@@ -224,11 +216,10 @@ export class TranscribeService {
           const isReformulation = incomingText.length < session.lastSentLength;
 
           if (isReformulation) {
-            // AssemblyAI reinició su contexto — cerrar bloque anterior y abrir nuevo
             if (session.accumulatedText.trim()) {
               const prevLang = this.detectLanguage(session.accumulatedText);
               this.logger.log(
-                `🔄 REFORMULACIÓN → cierre forzado [${sessionId}]: "${session.accumulatedText.substring(0, 60)}"`,
+                `🔄 REFORMULACIÓN [${sessionId}]: cerrando bloque anterior`,
               );
               callback(
                 JSON.stringify({
@@ -243,10 +234,6 @@ export class TranscribeService {
             session.accumulatedText = incomingText;
             session.lastSentLength = incomingText.length;
 
-            this.logger.log(
-              `🆕 NUEVO BLOQUE tras reformulación [${sessionId}] [${detectedLang}]: "${incomingText.substring(0, 60)}"`,
-            );
-
             callback(
               JSON.stringify({
                 text: incomingText,
@@ -257,17 +244,15 @@ export class TranscribeService {
               }),
             );
           } else if (incomingText.length > session.lastSentLength) {
-            // Hay texto nuevo
             const newText = incomingText
               .substring(session.lastSentLength)
               .trim();
-
             session.accumulatedText = incomingText;
             session.lastSentLength = incomingText.length;
 
             if (newText) {
               this.logger.log(
-                `📝 PARTIAL [${sessionId}] [${detectedLang}]: "+${newText.substring(0, 40)}" (total: ${incomingText.length})`,
+                `📝 PARTIAL [${sessionId}] [${detectedLang}]: "+${newText.substring(0, 40)}"`,
               );
               callback(
                 JSON.stringify({
@@ -279,9 +264,8 @@ export class TranscribeService {
               );
             }
           }
-          // Longitud igual → duplicado, ignorar
+          // Igual longitud → duplicado, ignorar
 
-          // Reiniciar timer de cierre forzado
           this.resetTurnTimer(sessionId);
         }
       });
@@ -293,9 +277,7 @@ export class TranscribeService {
       });
 
       transcriber.on('close', (code: number, reason: string) => {
-        this.logger.log(
-          `WS cerrado [${sessionId}] (code: ${code}, reason: ${reason})`,
-        );
+        this.logger.log(`WS cerrado [${sessionId}] (code: ${code})`);
         const session = this.sessionData.get(sessionId);
         if (session?.turnTimer) clearTimeout(session.turnTimer);
         this.sessionData.delete(sessionId);
@@ -303,7 +285,7 @@ export class TranscribeService {
       });
 
       await transcriber.connect();
-      this.logger.log(`transcriber.connect() OK para ${sessionId}`);
+      this.logger.log(`✅ transcriber.connect() OK para ${sessionId}`);
 
       const sendChunk = (chunk: ArrayBuffer) => {
         if (!isOpen) {
@@ -320,7 +302,7 @@ export class TranscribeService {
           const pcmData = new Int16Array(chunk);
           const avgLevel = this.calculateAudioLevel(pcmData);
           this.logger.log(
-            `📤 [${sessionId}] Chunk #${session.chunkCount}: ${pcmData.length} samples, nivel: ${avgLevel.toFixed(1)}dB`,
+            `📤 [${sessionId}] Chunk #${session.chunkCount}: ${pcmData.length} samples, ${avgLevel.toFixed(1)}dB`,
           );
         }
       };
@@ -340,17 +322,8 @@ export class TranscribeService {
       this.logger.error(
         `❌ Error iniciando AssemblyAI [${sessionId}]: ${error.message}`,
       );
-      const fallbackInterval = setInterval(() => {
-        callback(
-          JSON.stringify({
-            text: 'Error conectando con AssemblyAI',
-            language: 'es',
-            isNewTurn: true,
-            sessionId,
-          }),
-        );
-      }, 5000);
-      return { send: () => {}, close: () => clearInterval(fallbackInterval) };
+      this.sessionData.delete(sessionId);
+      throw error; // Re-throw para que el gateway emita 'error' al cliente
     }
   }
 
@@ -362,7 +335,6 @@ export class TranscribeService {
     return 20 * Math.log10(normalized + 0.0001);
   }
 }
-
 // import { Injectable, Logger } from '@nestjs/common';
 // import { AssemblyAI } from 'assemblyai';
 
@@ -371,18 +343,23 @@ export class TranscribeService {
 //   private readonly logger = new Logger(TranscribeService.name);
 //   private assembly: AssemblyAI | null;
 
+//   // Ajusta este valor según el ritmo de los intérpretes:
+//   // 1000ms = corta rápido (bueno si hablan en frases cortas con pausa breve)
+//   // 1500ms = balance recomendado
+//   // 2000ms = más tolerante (bueno si hacen pausas naturales largas entre frases)
+//   private readonly END_SILENCE_THRESHOLD_MS = 1500;
+
+//   // Timer de seguridad en backend: si AssemblyAI no envía is_final, lo forzamos
+//   // Debe ser mayor que END_SILENCE_THRESHOLD_MS
+//   private readonly FORCE_CLOSE_AFTER_MS = 1800;
+
 //   private sessionData = new Map<
 //     string,
 //     {
-//       // Acumulado COMPLETO del turno actual (para display progresivo)
 //       accumulatedText: string;
-//       // Cuánto ya enviamos al frontend (para enviar solo lo nuevo)
 //       lastSentLength: number;
-//       // Contador de chunks por sesión
 //       chunkCount: number;
-//       // Timer para forzar cierre de turno si AssemblyAI no envía is_final
 //       turnTimer: NodeJS.Timeout | null;
-//       // Callback guardado para poder usar en el timer
 //       callback: (data: string) => void;
 //     }
 //   >();
@@ -452,7 +429,6 @@ export class TranscribeService {
 //     return 'en';
 //   }
 
-//   // Fuerza el cierre de un turno si AssemblyAI no envía is_final
 //   private forceCloseTurn(sessionId: string): void {
 //     const session = this.sessionData.get(sessionId);
 //     if (!session || !session.accumulatedText.trim()) return;
@@ -468,19 +444,17 @@ export class TranscribeService {
 //       JSON.stringify({
 //         text,
 //         language: lang,
-//         isNewTurn: true, // Forzar finalización de bloque en el frontend
+//         isNewTurn: true,
 //         isForcedClose: true,
 //         sessionId,
 //       }),
 //     );
 
-//     // Reset para el siguiente turno
 //     session.accumulatedText = '';
 //     session.lastSentLength = 0;
 //     session.turnTimer = null;
 //   }
 
-//   // Reinicia el timer de cierre de turno
 //   private resetTurnTimer(sessionId: string): void {
 //     const session = this.sessionData.get(sessionId);
 //     if (!session) return;
@@ -490,11 +464,10 @@ export class TranscribeService {
 //       session.turnTimer = null;
 //     }
 
-//     // Si hay texto acumulado, programar cierre forzado en 2s de silencio
 //     if (session.accumulatedText.trim()) {
 //       session.turnTimer = setTimeout(() => {
 //         this.forceCloseTurn(sessionId);
-//       }, 2000);
+//       }, this.FORCE_CLOSE_AFTER_MS);
 //     }
 //   }
 
@@ -528,18 +501,16 @@ export class TranscribeService {
 //     });
 
 //     try {
-//       // NOTA: end_silence_threshold controla cuándo AssemblyAI emite is_final.
-//       // Con 1500ms, cerrará el turno si hay 1.5s de silencio.
-//       // Además usamos nuestro propio timer de 2s como seguro por si is_final no llega.
 //       const config = {
 //         sampleRate: 16000,
 //         speechModel: 'universal-streaming-multilingual' as any,
-//         end_silence_threshold: 1500, // 1.5s — AssemblyAI emite is_final tras este silencio
+//         end_silence_threshold: this.END_SILENCE_THRESHOLD_MS,
 //         disable_partial_transcripts: false,
 //       };
 
 //       this.logger.log(
-//         `🎤 Config: sampleRate=16000, modelo=multilingual, silence=1500ms`,
+//         `🎤 Config: sampleRate=16000, modelo=multilingual, ` +
+//           `silence=${this.END_SILENCE_THRESHOLD_MS}ms, forceClose=${this.FORCE_CLOSE_AFTER_MS}ms`,
 //       );
 
 //       const transcriber = this.assembly.streaming.transcriber(config);
@@ -564,8 +535,7 @@ export class TranscribeService {
 //         const detectedLang = this.detectLanguage(incomingText);
 
 //         if (isFinal) {
-//           // ─── TURNO FINAL ────────────────────────────────────────────────
-//           // AssemblyAI cerró el turno. Cancelar nuestro timer.
+//           // AssemblyAI cerró el turno — cancelar nuestro timer
 //           if (session.turnTimer) {
 //             clearTimeout(session.turnTimer);
 //             session.turnTimer = null;
@@ -575,7 +545,6 @@ export class TranscribeService {
 //             `✅ FINAL [${sessionId}] [${detectedLang}]: "${incomingText.substring(0, 80)}"`,
 //           );
 
-//           // Enviar el texto COMPLETO del turno como bloque finalizado
 //           callback(
 //             JSON.stringify({
 //               text: incomingText,
@@ -585,36 +554,29 @@ export class TranscribeService {
 //             }),
 //           );
 
-//           // Reset acumulador para el siguiente turno
 //           session.accumulatedText = '';
 //           session.lastSentLength = 0;
 //         } else {
-//           // ─── PARTIAL ────────────────────────────────────────────────────
-
-//           // Detectar si AssemblyAI reformuló (el texto nuevo es MÁS CORTO que el acumulado)
-//           // Esto pasa cuando AssemblyAI reinicia su contexto interno tras silencio largo
+//           // PARTIAL
 //           const isReformulation = incomingText.length < session.lastSentLength;
 
 //           if (isReformulation) {
-//             // AssemblyAI borró lo anterior y empezó de nuevo.
-//             // Forzar cierre del bloque anterior AHORA antes de procesar el nuevo texto.
+//             // AssemblyAI reinició su contexto — cerrar bloque anterior y abrir nuevo
 //             if (session.accumulatedText.trim()) {
 //               const prevLang = this.detectLanguage(session.accumulatedText);
 //               this.logger.log(
-//                 `🔄 REFORMULACIÓN → Forzando cierre de bloque anterior [${sessionId}]: "${session.accumulatedText.substring(0, 60)}"`,
+//                 `🔄 REFORMULACIÓN → cierre forzado [${sessionId}]: "${session.accumulatedText.substring(0, 60)}"`,
 //               );
-
 //               callback(
 //                 JSON.stringify({
 //                   text: session.accumulatedText.trim(),
 //                   language: prevLang,
-//                   isNewTurn: true, // Cierra el bloque anterior
+//                   isNewTurn: true,
 //                   sessionId,
 //                 }),
 //               );
 //             }
 
-//             // Iniciar nuevo bloque con el texto que viene
 //             session.accumulatedText = incomingText;
 //             session.lastSentLength = incomingText.length;
 
@@ -622,18 +584,17 @@ export class TranscribeService {
 //               `🆕 NUEVO BLOQUE tras reformulación [${sessionId}] [${detectedLang}]: "${incomingText.substring(0, 60)}"`,
 //             );
 
-//             // Enviar el nuevo texto como inicio de bloque
 //             callback(
 //               JSON.stringify({
 //                 text: incomingText,
 //                 language: detectedLang,
 //                 isNewTurn: false,
-//                 isNewBlock: true, // señal extra para el frontend
+//                 isNewBlock: true,
 //                 sessionId,
 //               }),
 //             );
 //           } else if (incomingText.length > session.lastSentLength) {
-//             // Texto creció → hay texto nuevo que enviar
+//             // Hay texto nuevo
 //             const newText = incomingText
 //               .substring(session.lastSentLength)
 //               .trim();
@@ -645,7 +606,6 @@ export class TranscribeService {
 //               this.logger.log(
 //                 `📝 PARTIAL [${sessionId}] [${detectedLang}]: "+${newText.substring(0, 40)}" (total: ${incomingText.length})`,
 //               );
-
 //               callback(
 //                 JSON.stringify({
 //                   text: newText,
@@ -656,9 +616,9 @@ export class TranscribeService {
 //               );
 //             }
 //           }
-//           // Si longitud igual → mismo texto, ignorar
+//           // Longitud igual → duplicado, ignorar
 
-//           // Reiniciar timer de cierre forzado (seguro en caso de que is_final no llegue)
+//           // Reiniciar timer de cierre forzado
 //           this.resetTurnTimer(sessionId);
 //         }
 //       });
@@ -673,7 +633,6 @@ export class TranscribeService {
 //         this.logger.log(
 //           `WS cerrado [${sessionId}] (code: ${code}, reason: ${reason})`,
 //         );
-//         // Limpiar timer si existía
 //         const session = this.sessionData.get(sessionId);
 //         if (session?.turnTimer) clearTimeout(session.turnTimer);
 //         this.sessionData.delete(sessionId);
@@ -688,7 +647,6 @@ export class TranscribeService {
 //           this.logger.warn(`⚠️ Chunk descartado [${sessionId}]: WS no abierto`);
 //           return;
 //         }
-
 //         const session = this.sessionData.get(sessionId);
 //         if (!session) return;
 
@@ -707,13 +665,10 @@ export class TranscribeService {
 //       return {
 //         send: sendChunk,
 //         close: () => {
-//           // Al cerrar, forzar envío del último turno si quedó texto pendiente
 //           const session = this.sessionData.get(sessionId);
 //           if (session) {
 //             if (session.turnTimer) clearTimeout(session.turnTimer);
-//             if (session.accumulatedText.trim()) {
-//               this.forceCloseTurn(sessionId);
-//             }
+//             if (session.accumulatedText.trim()) this.forceCloseTurn(sessionId);
 //           }
 //           transcriber.close();
 //         },
