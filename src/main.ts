@@ -1,41 +1,27 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { IoAdapter } from '@nestjs/platform-socket.io'; // ← Registra /socket.io
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Adapter para Socket.io (crea /socket.io route)
-  app.useWebSocketAdapter(new IoAdapter(app));
-
-  // CORS global (local + prod)
+  // ── CORS ────────────────────────────────────────────────────────────────
+  // Permite peticiones desde Vercel (producción) y localhost (desarrollo)
   app.enableCors({
     origin: [
       'https://getintercall.vercel.app',
-      'http://localhost:4200', // Local Angular
-      'getintercall-git-main-adonis-projects-9faf0f78.vercel.app', // Tu Vercel URL (ajusta si cambia)
+      'https://localhost:4200',
+      'http://localhost:4200',
+      'https://localhost:3000',
+      'http://localhost:3000',
     ],
-    methods: 'GET,POST,PUT,DELETE,OPTIONS', // OPTIONS para polling
-    allowedHeaders: 'Content-Type, Authorization',
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
-    preflightContinue: false,
   });
 
-  // Swagger (opcional)
-  const config = new DocumentBuilder()
-    .setTitle('GetIntercall API')
-    .setDescription('API para transcripción real-time')
-    .setVersion('1.0')
-    .addTag('Transcribe')
-    .build();
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('docs', app, document);
-
   const port = process.env.PORT || 3000;
-
   await app.listen(port);
-  console.log('Backend corriendo en http://localhost:3000');
+  console.log(`Backend corriendo en puerto ${port}`);
 }
 bootstrap();
 // import { NestFactory } from '@nestjs/core';
