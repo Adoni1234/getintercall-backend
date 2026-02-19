@@ -1,33 +1,33 @@
 import {
   WebSocketGateway,
-  WebSocketServer,
   SubscribeMessage,
+  MessageBody,
+  ConnectedSocket,
+  WebSocketServer,
   OnGatewayConnection,
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { TranscribeService } from './transcribe.service';
 import { Logger } from '@nestjs/common';
+import { TranscribeService } from './transcribe.service';
 
 @WebSocketGateway({
   cors: {
     origin: [
-      'https://getintercall.vercel.app',
-      'https://localhost:4200',
       'http://localhost:4200',
-      'https://localhost:3000',
-      'http://localhost:3000',
+      'https://localhost:4200',
+      'getintercall-git-main-adonis-projects-9faf0f78.vercel.app',
+      'https://getintercall.vercel.app',
     ],
     methods: ['GET', 'POST'],
     credentials: true,
   },
-  transports: ['websocket', 'polling'],
 })
-export class TranscribeGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class TranscribeGateway
+  implements OnGatewayConnection, OnGatewayDisconnect
+{
   @WebSocketServer() server: Server;
   private readonly logger = new Logger(TranscribeGateway.name);
-
-  private sessions = new Map<string, { transcriber: any; chunkQueue: ArrayBuffer[]; isReady: boolean }>();
 
   constructor(private transcribeService: TranscribeService) {}
 
@@ -35,90 +35,230 @@ export class TranscribeGateway implements OnGatewayConnection, OnGatewayDisconne
     this.logger.log(`Cliente conectado: ${client.id}`);
   }
 
-  handleDisconnect(client: Socket) {
-    this.logger.log(`Cliente desconectado: ${client.id}`);
-    // Limpiar sesiones del cliente desconectado
-    this.sessions.forEach((session, sessionId) => {
-      if ((session as any).clientId === client.id) {
-        session.transcriber?.close();
-        this.sessions.delete(sessionId);
-      }
-    });
-  }
-
   @SubscribeMessage('startTranscription')
-  async handleStart(client: Socket, payload: { sessionId: string }) {
-    const { sessionId } = payload;
-    this.logger.log(`Iniciando transcripción para sesión ${sessionId}`);
-
-    this.sessions.set(sessionId, {
-      transcriber: null,
-      chunkQueue: [],
-      isReady: false,
-      clientId: client.id,
-    } as any);
-
-    const transcriber = await this.transcribeService.startRealTimeTranscription(
-      sessionId,
-      (partialData: string) => {
-        this.logger.log(`Emisión partial desde Gateway [${sessionId}]: ${partialData.substring(0, 80)}...`);
-        client.emit('partialTranscript', partialData);
-      },
+  async handleStart(
+    @MessageBody() data: { sessionId: string },
+    @ConnectedSocket() client: Socket,
+  ) {
+    this.logger.log(
+      `Recibido startTranscription para session ${data.sessionId} desde ${client.id}`,
     );
-
-    const session = this.sessions.get(sessionId);
-    if (session) {
-      session.transcriber = transcriber;
-      session.isReady = true;
-
-      // Enviar chunks que llegaron antes de que el WS estuviera listo
-      if (session.chunkQueue.length > 0) {
-        this.logger.log(`Enviando ${session.chunkQueue.length} chunks en cola para ${sessionId}`);
-        session.chunkQueue.forEach(chunk => transcriber.send(chunk));
-        session.chunkQueue = [];
+    try {
+      this.logger.log(`Llamando service para ${data.sessionId}`);
+      const wsProxy = await this.transcribeService.startRealTimeTranscription(
+        data.sessionId,
+        (partialData: string) => {
+          this.logger.log(
+            `Emisión partial desde Gateway [${data.sessionId}]: ${partialData.substring(0, 50)}...`,
+          );
+          client.emit('partialTranscript', partialData); // String JSON
+        },
+      );
+      client.data.ws = wsProxy;
+      client.data.chunkQueue = []; // Queue for delayed chunks
+      this.logger.log(`WS AssemblyAI asignado para ${data.sessionId}`);
+      client.emit('started', {
+        sessionId: data.sessionId,
+        message: 'Real-time iniciado',
+      }); // ← Emit after await
+      // Flush queued chunks
+      const queue = client.data.chunkQueue || [];
+      for (const queuedChunk of queue) {
+        wsProxy.send(queuedChunk);
+        this.logger.log(
+          `Queued chunk flushed for ${data.sessionId}: ${queuedChunk.byteLength} bytes`,
+        );
       }
+      delete client.data.chunkQueue;
+    } catch (error) {
+      this.logger.error(
+        `Error iniciando AssemblyAI para ${data.sessionId}: ${error.message}`,
+      );
+      client.emit('error', { message: error.message });
     }
-
-    client.emit('started', { sessionId });
   }
 
   @SubscribeMessage('audioChunk')
-  handleChunk(client: Socket, payload: { sessionId: string; chunk: number[] }) {
-    const { sessionId, chunk } = payload;
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-
-    const buffer = new Uint8Array(chunk).buffer;
-
-    if (!session.isReady || !session.transcriber) {
-      session.chunkQueue.push(buffer);
-      return;
+  handleAudioChunk(
+    @MessageBody() data: { sessionId: string; chunk: number[] },
+    @ConnectedSocket() client: Socket,
+  ) {
+    const chunkArray = data.chunk;
+    const chunkBuffer = new Uint8Array(chunkArray).buffer;
+    this.logger.log(
+      `Recibido chunk para session ${data.sessionId}: ${chunkBuffer.byteLength} bytes desde ${client.id}`,
+    );
+    const wsProxy = client.data.ws;
+    if (wsProxy && wsProxy.send) {
+      wsProxy.send(chunkBuffer);
+      this.logger.log(
+        `Chunk enviado via proxy para ${data.sessionId}, reconstructed ${chunkBuffer.byteLength} bytes`,
+      );
+    } else {
+      // Queue if not ready
+      if (!client.data.chunkQueue) client.data.chunkQueue = [];
+      client.data.chunkQueue.push(chunkBuffer);
+      this.logger.warn(
+        `Chunk queued for session ${data.sessionId} (proxy not ready yet)`,
+      );
     }
-
-    const chunkIndex = (session as any).chunkIndex || 0;
-    (session as any).chunkIndex = chunkIndex + 1;
-
-    if (chunkIndex % 20 === 0) {
-      this.logger.log(`📤 Chunk #${chunkIndex} enviado para ${sessionId}: ${buffer.byteLength} bytes`);
-    }
-
-    session.transcriber.send(buffer);
+    client.emit('chunkReceived', {
+      sessionId: data.sessionId,
+      size: chunkBuffer.byteLength,
+    });
   }
 
   @SubscribeMessage('stopTranscription')
-  handleStop(client: Socket, payload: { sessionId: string }) {
-    const { sessionId } = payload;
-    this.logger.log(`Recibido stop para session ${sessionId} desde ${client.id}`);
-
-    const session = this.sessions.get(sessionId);
-    if (session?.transcriber) {
-      session.transcriber.close();
-      this.logger.log(`WS AssemblyAI cerrado para ${sessionId}`);
+  handleStop(
+    @MessageBody() data: { sessionId: string },
+    @ConnectedSocket() client: Socket,
+  ) {
+    this.logger.log(
+      `Recibido stop para session ${data.sessionId} desde ${client.id}`,
+    );
+    const wsProxy = client.data.ws;
+    if (wsProxy && wsProxy.close) {
+      wsProxy.close();
+      client.data.ws = null;
+      delete client.data.chunkQueue;
+      this.logger.log(`WS AssemblyAI cerrado para ${data.sessionId}`);
     }
-    this.sessions.delete(sessionId);
-    client.emit('stopped', { sessionId });
+    client.emit('stopped', { sessionId: data.sessionId });
+  }
+
+  handleDisconnect(client: Socket) {
+    this.logger.log(`Cliente desconectado: ${client.id}`);
+    const wsProxy = client.data.ws;
+    if (wsProxy && wsProxy.close) {
+      wsProxy.close();
+      client.data.ws = null;
+      delete client.data.chunkQueue;
+    }
   }
 }
+
+
+// import {
+//   WebSocketGateway,
+//   WebSocketServer,
+//   SubscribeMessage,
+//   OnGatewayConnection,
+//   OnGatewayDisconnect,
+// } from '@nestjs/websockets';
+// import { Server, Socket } from 'socket.io';
+// import { TranscribeService } from './transcribe.service';
+// import { Logger } from '@nestjs/common';
+
+// @WebSocketGateway({
+//   cors: {
+//     origin: [
+//       'https://getintercall.vercel.app',
+//       'https://localhost:4200',
+//       'http://localhost:4200',
+//       'https://localhost:3000',
+//       'http://localhost:3000',
+//     ],
+//     methods: ['GET', 'POST'],
+//     credentials: true,
+//   },
+//   transports: ['websocket', 'polling'],
+// })
+// export class TranscribeGateway implements OnGatewayConnection, OnGatewayDisconnect {
+//   @WebSocketServer() server: Server;
+//   private readonly logger = new Logger(TranscribeGateway.name);
+
+//   private sessions = new Map<string, { transcriber: any; chunkQueue: ArrayBuffer[]; isReady: boolean }>();
+
+//   constructor(private transcribeService: TranscribeService) {}
+
+//   handleConnection(client: Socket) {
+//     this.logger.log(`Cliente conectado: ${client.id}`);
+//   }
+
+//   handleDisconnect(client: Socket) {
+//     this.logger.log(`Cliente desconectado: ${client.id}`);
+//     // Limpiar sesiones del cliente desconectado
+//     this.sessions.forEach((session, sessionId) => {
+//       if ((session as any).clientId === client.id) {
+//         session.transcriber?.close();
+//         this.sessions.delete(sessionId);
+//       }
+//     });
+//   }
+
+//   @SubscribeMessage('startTranscription')
+//   async handleStart(client: Socket, payload: { sessionId: string }) {
+//     const { sessionId } = payload;
+//     this.logger.log(`Iniciando transcripción para sesión ${sessionId}`);
+
+//     this.sessions.set(sessionId, {
+//       transcriber: null,
+//       chunkQueue: [],
+//       isReady: false,
+//       clientId: client.id,
+//     } as any);
+
+//     const transcriber = await this.transcribeService.startRealTimeTranscription(
+//       sessionId,
+//       (partialData: string) => {
+//         this.logger.log(`Emisión partial desde Gateway [${sessionId}]: ${partialData.substring(0, 80)}...`);
+//         client.emit('partialTranscript', partialData);
+//       },
+//     );
+
+//     const session = this.sessions.get(sessionId);
+//     if (session) {
+//       session.transcriber = transcriber;
+//       session.isReady = true;
+
+//       // Enviar chunks que llegaron antes de que el WS estuviera listo
+//       if (session.chunkQueue.length > 0) {
+//         this.logger.log(`Enviando ${session.chunkQueue.length} chunks en cola para ${sessionId}`);
+//         session.chunkQueue.forEach(chunk => transcriber.send(chunk));
+//         session.chunkQueue = [];
+//       }
+//     }
+
+//     client.emit('started', { sessionId });
+//   }
+
+//   @SubscribeMessage('audioChunk')
+//   handleChunk(client: Socket, payload: { sessionId: string; chunk: number[] }) {
+//     const { sessionId, chunk } = payload;
+//     const session = this.sessions.get(sessionId);
+//     if (!session) return;
+
+//     const buffer = new Uint8Array(chunk).buffer;
+
+//     if (!session.isReady || !session.transcriber) {
+//       session.chunkQueue.push(buffer);
+//       return;
+//     }
+
+//     const chunkIndex = (session as any).chunkIndex || 0;
+//     (session as any).chunkIndex = chunkIndex + 1;
+
+//     if (chunkIndex % 20 === 0) {
+//       this.logger.log(`📤 Chunk #${chunkIndex} enviado para ${sessionId}: ${buffer.byteLength} bytes`);
+//     }
+
+//     session.transcriber.send(buffer);
+//   }
+
+//   @SubscribeMessage('stopTranscription')
+//   handleStop(client: Socket, payload: { sessionId: string }) {
+//     const { sessionId } = payload;
+//     this.logger.log(`Recibido stop para session ${sessionId} desde ${client.id}`);
+
+//     const session = this.sessions.get(sessionId);
+//     if (session?.transcriber) {
+//       session.transcriber.close();
+//       this.logger.log(`WS AssemblyAI cerrado para ${sessionId}`);
+//     }
+//     this.sessions.delete(sessionId);
+//     client.emit('stopped', { sessionId });
+//   }
+// }
 // import {
 //   WebSocketGateway,
 //   SubscribeMessage,
