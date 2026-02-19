@@ -10,6 +10,7 @@ async function bootstrap() {
       'https://getintercall.vercel.app',
       'https://localhost:4200',
       'http://localhost:4200',
+      'https://getintercall-mup5dfxnc-adonis-projects-9faf0f78.vercel.app'
     ],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
@@ -23,9 +24,9 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('docs', app, document);
 
-  const port = process.env.PORT || 3000;
-  await app.listen(port, '0.0.0.0');
-  console.log(`Backend corriendo en puerto ${port}`);
+  // const port = process.env.PORT || 3000;
+  await app.listen(3000);
+  console.log(`Backend corriendo en puerto 3000`);
 }
 bootstrap();
 // import { NestFactory } from '@nestjs/core';
